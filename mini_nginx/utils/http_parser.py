@@ -6,7 +6,7 @@ def parse_headers(header_lines: list[str]) -> dict[str, str]:
         if ':' not in line:
             raise ValueError(f'Bad header line: {line!r}')
         name, value = line.split(':', 1)
-        headers[name] = value
+        headers[name.strip().lower()] = value.strip()
     return headers
 
 
@@ -22,16 +22,15 @@ def parse_response_head(head: bytes) -> tuple[str, int, dict[str, str]]:
     return parts[0], int(parts[1]), parse_headers(lines[1:])
 
 
-def parse_request_head(head: bytes) -> tuple[str, str, dict[str, str]]:
+def parse_request_head(head: bytes) -> tuple[str, str, str, dict[str, str]]:
     text = head.decode('latin1')
     lines = text.split('\r\n')
 
     request_line = lines[0]
     parts = request_line.split(' ')
 
-    method, path, _ = parts
-
-    return method, path, parse_headers(lines[1:])
+    method, path, version = parts
+    return method, path, version, parse_headers(lines[1:])
 
 
 def get_content_length(headers: dict[str, str]) -> int:

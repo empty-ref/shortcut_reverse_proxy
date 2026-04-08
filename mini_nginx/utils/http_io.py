@@ -6,12 +6,18 @@ from mini_nginx.constants import HEADER_END, READ_CHUNK_SIZE
 logger = logging.getLogger(__name__)
 
 
+class ClientClosedConnection(ConnectionError):
+    pass
+
+
 async def read_headers(reader: asyncio.StreamReader, timeout: float) -> bytes:
     try:
         data = await asyncio.wait_for(reader.readuntil(HEADER_END), timeout=timeout)
     except asyncio.LimitOverrunError as e:
         raise ValueError('header section is too large') from e
     except asyncio.IncompleteReadError as e:
+        if not e.partial:
+            raise ClientClosedConnection('client closed connection before sending headers') from e
         raise ConnectionError('unexpected EOF while reading headers') from e
 
     return data

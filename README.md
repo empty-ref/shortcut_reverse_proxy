@@ -51,6 +51,4 @@ Run:
 
 ```bash
 make k6
-make k6-smoke
-make k6-stress
 ```

@@ -6,7 +6,14 @@ import time
 from mini_nginx.config import ProxyConfig
 from mini_nginx.constants import DEFAULT_502_RESPONSE, DEFAULT_504_RESPONSE
 from mini_nginx.upstream_pool import UpstreamPool
-from mini_nginx.utils.http_io import pipe_chunked_body, pipe_exact, pipe_until_eof, read_headers, write_all
+from mini_nginx.utils.http_io import (
+    ClientClosedConnection,
+    pipe_chunked_body,
+    pipe_exact,
+    pipe_until_eof,
+    read_headers,
+    write_all,
+)
 from mini_nginx.utils.http_parser import (
     get_content_length,
     is_chunked_response,
@@ -27,11 +34,11 @@ async def send_response(writer: asyncio.StreamWriter, data: bytes) -> None:
 
 async def read_client_request(
     client_reader: asyncio.StreamReader, read_timeout: float
-) -> tuple[bytes, str, str, dict[str, str]]:
+) -> tuple[bytes, str, str, str, dict[str, str]]:
     request_head = await read_headers(client_reader, timeout=read_timeout)
-    method, path, headers = parse_request_head(request_head)
+    method, path, version, headers = parse_request_head(request_head)
 
-    return request_head, method, path, headers
+    return request_head, method, path, version, headers
 
 
 async def forward_request_body(
@@ -97,49 +104,83 @@ async def handle_client(
     config: ProxyConfig,
     pool: UpstreamPool,
 ) -> None:
-
-    started = time.perf_counter()
-    req_uuid = uuid.uuid4()
-    logger.info(f'request {req_uuid}: start')
-    upstream = upstream_writer = None
-
     try:
-        request_head, method, path, headers = await read_client_request(client_reader, config.read_timeout)
-        upstream = await pool.acquire_upstream()
-        logger.info(f'request {req_uuid}: acquire upstream {upstream.host}:{upstream.port}')
+        while True:
+            started = time.perf_counter()
+            req_uuid = uuid.uuid4()
+            logger.debug('request %s: start', req_uuid)
+            stage = 'read_client_request'
 
-        upstream_reader, upstream_writer = await asyncio.wait_for(
-            asyncio.open_connection(upstream.host, upstream.port),
-            timeout=config.connect_timeout,
-        )
+            upstream = upstream_writer = None
+            try:
+                request_head, method, path, request_version, headers = await read_client_request(
+                    client_reader, config.read_timeout
+                )
+                stage = 'acquire_upstream'
+                upstream = await pool.acquire_upstream()
+                logger.debug('request %s: acquire upstream %s:%s path=%s', req_uuid, upstream.host, upstream.port, path)
 
-        await write_all(upstream_writer, request_head, timeout=config.write_timeout)
+                stage = 'open_upstream_connection'
+                upstream_reader, upstream_writer = await asyncio.wait_for(
+                    asyncio.open_connection(upstream.host, upstream.port),
+                    timeout=config.connect_timeout,
+                )
 
-        await forward_request_body(client_reader=client_reader, upstream_writer=upstream_writer, headers=headers)
+                stage = 'write_request_head'
+                await write_all(upstream_writer, request_head, timeout=config.write_timeout)
+                stage = 'forward_request_body'
+                await forward_request_body(
+                    client_reader=client_reader, upstream_writer=upstream_writer, headers=headers
+                )
 
-        await forward_response(
-            upstream_reader=upstream_reader,
-            client_writer=client_writer,
-            method=method,
-            read_timeout=config.read_timeout,
-            write_timeout=config.write_timeout,
-        )
-    except Exception as e:
-        logger.exception(f'error while processing client {e}')
-        with contextlib.suppress(Exception):
-            await send_response(client_writer, DEFAULT_502_RESPONSE)
+                stage = 'forward_response'
+                response_version, _, _, response_headers, response_is_delimited = await forward_response(
+                    upstream_reader=upstream_reader,
+                    client_writer=client_writer,
+                    method=method,
+                    read_timeout=config.read_timeout,
+                    write_timeout=config.write_timeout,
+                )
 
+                client_wants_keep_alive = should_keep_alive(request_version, headers)
+                upstream_allows_keep_alive = should_keep_alive(response_version, response_headers)
+                keep_alive = client_wants_keep_alive and upstream_allows_keep_alive and response_is_delimited
+                if not keep_alive:
+                    break
+            except ClientClosedConnection:
+                logger.debug('request %s: client closed keep-alive connection', req_uuid)
+                break
+            except (ConnectionError, asyncio.IncompleteReadError) as e:
+                logger.warning(
+                    'request %s connection closed at stage=%s type=%s error=%r',
+                    req_uuid,
+                    stage,
+                    type(e).__name__,
+                    e,
+                )
+                break
+            except Exception as e:
+                logger.exception(
+                    'request %s failed at stage=%s type=%s error=%r',
+                    req_uuid,
+                    stage,
+                    type(e).__name__,
+                    e,
+                )
+                with contextlib.suppress(Exception):
+                    await send_response(client_writer, DEFAULT_502_RESPONSE)
+                break
+            finally:
+                if upstream_writer is not None:
+                    upstream_writer.close()
+                    with contextlib.suppress(Exception):
+                        await upstream_writer.wait_closed()
+
+                if upstream is not None:
+                    pool.release_upstream(upstream)
+
+                logger.debug('request %s DONE - %.3f ms.', req_uuid, (time.perf_counter() - started) * 1000)
     finally:
-        if upstream_writer is not None:
-            upstream_writer.close()
-            with contextlib.suppress(Exception):
-                await upstream_writer.wait_closed()
-
         client_writer.close()
         with contextlib.suppress(Exception):
             await client_writer.wait_closed()
-
-        if upstream is not None:
-            pool.release_upstream(upstream)
-
-    logger.info(f'request {req_uuid} DONE - {(time.perf_counter() - started) * 1000} ms.')
