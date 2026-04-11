@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     config = ProxyConfig()
-    pool = UpstreamPool(upstreams=[('127.0.0.1', 9001), ('127.0.0.1', 9002)])
+    pool = UpstreamPool(upstreams=config.upstreams, max_conns_per_upstream=config.max_conns_per_upstream)
     client_limiter = ClientLimiter(config.max_client_conns)
 
     async def client_connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -48,12 +48,7 @@ async def main() -> None:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
         except Exception as e:
-            logger.exception(
-                'client handler failed peer=%s type=%s error=%r',
-                peer,
-                type(e).__name__,
-                e,
-            )
+            logger.exception('client handler failed peer=%s type=%s error=%r', peer, type(e).__name__, e)
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

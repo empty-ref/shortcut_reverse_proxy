@@ -2,9 +2,9 @@ listen_host: 127.0.0.1
 listen_port: 8080
 
 connect_timeout: 3.0
-read_timeout: 15.0
-write_timeout: 15.0
-total_timeout: 30.0
+read_timeout: 5.0
+write_timeout: 5.0
+total_timeout: 15.0
 max_header_bytes: 65536
 max_requests_per_client_connection: 100
 

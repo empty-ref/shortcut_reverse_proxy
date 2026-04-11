@@ -6,8 +6,8 @@ export const options = {
   scenarios: {
     steady_load: {
       executor: 'constant-vus',
-      vus: Number(__ENV.VUS || 1000),
-      duration: __ENV.DURATION || '30s',
+      vus: Number(__ENV.VUS || 1200),
+      duration: __ENV.DURATION || '60s',
     },
   },
   thresholds: {

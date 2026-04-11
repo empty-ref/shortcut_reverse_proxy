@@ -111,20 +111,15 @@ async def handle_client(
             logger.debug('request %s: start', req_uuid)
             stage = 'read_client_request'
 
-            upstream = upstream_writer = None
+            upstream = upstream_reader = upstream_writer = None
+            upstream_reusable = False
             try:
                 request_head, method, path, request_version, headers = await read_client_request(
                     client_reader, config.read_timeout
                 )
-                stage = 'acquire_upstream'
-                upstream = await pool.acquire_upstream()
+                stage = 'acquire_upstream_connection'
+                upstream, upstream_reader, upstream_writer = await pool.acquire_connection(config.connect_timeout)
                 logger.debug('request %s: acquire upstream %s:%s path=%s', req_uuid, upstream.host, upstream.port, path)
-
-                stage = 'open_upstream_connection'
-                upstream_reader, upstream_writer = await asyncio.wait_for(
-                    asyncio.open_connection(upstream.host, upstream.port),
-                    timeout=config.connect_timeout,
-                )
 
                 stage = 'write_request_head'
                 await write_all(upstream_writer, request_head, timeout=config.write_timeout)
@@ -145,6 +140,7 @@ async def handle_client(
                 client_wants_keep_alive = should_keep_alive(request_version, headers)
                 upstream_allows_keep_alive = should_keep_alive(response_version, response_headers)
                 keep_alive = client_wants_keep_alive and upstream_allows_keep_alive and response_is_delimited
+                upstream_reusable = upstream_allows_keep_alive and response_is_delimited
                 if not keep_alive:
                     break
             except ClientClosedConnection:
@@ -152,32 +148,24 @@ async def handle_client(
                 break
             except (ConnectionError, asyncio.IncompleteReadError) as e:
                 logger.warning(
-                    'request %s connection closed at stage=%s type=%s error=%r',
-                    req_uuid,
-                    stage,
-                    type(e).__name__,
-                    e,
+                    'request %s connection closed at stage=%s type=%s error=%r', req_uuid, stage, type(e).__name__, e
                 )
                 break
             except Exception as e:
                 logger.exception(
-                    'request %s failed at stage=%s type=%s error=%r',
-                    req_uuid,
-                    stage,
-                    type(e).__name__,
-                    e,
+                    'request %s failed at stage=%s type=%s error=%r', req_uuid, stage, type(e).__name__, e
                 )
                 with contextlib.suppress(Exception):
                     await send_response(client_writer, DEFAULT_502_RESPONSE)
                 break
             finally:
-                if upstream_writer is not None:
-                    upstream_writer.close()
-                    with contextlib.suppress(Exception):
-                        await upstream_writer.wait_closed()
-
-                if upstream is not None:
-                    pool.release_upstream(upstream)
+                if upstream is not None and upstream_reader is not None and upstream_writer is not None:
+                    await pool.release_connection(
+                        upstream=upstream,
+                        reader=upstream_reader,
+                        writer=upstream_writer,
+                        reusable=upstream_reusable,
+                    )
 
                 logger.debug('request %s DONE - %.3f ms.', req_uuid, (time.perf_counter() - started) * 1000)
     finally:
