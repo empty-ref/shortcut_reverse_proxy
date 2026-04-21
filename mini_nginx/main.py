@@ -22,6 +22,7 @@ async def main() -> None:
     config = ProxyConfig()
     pool = UpstreamPool(upstreams=config.upstreams, max_conns_per_upstream=config.max_conns_per_upstream)
     client_limiter = ClientLimiter(config.max_client_conns)
+    client_proxy_semaphore = asyncio.Semaphore(config.max_client_conns)
 
     async def client_connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info('peername')
@@ -41,7 +42,8 @@ async def main() -> None:
         logger.debug('client accepted: active=%s', client_limiter.active)
 
         try:
-            await asyncio.wait_for(handle_client(reader, writer, config, pool), timeout=config.total_timeout)
+            async with client_proxy_semaphore:
+                await asyncio.wait_for(handle_client(reader, writer, config, pool), timeout=config.total_timeout)
         except asyncio.TimeoutError:
             logger.exception('total timeout exceeded peer=%s', peer)
             writer.close()

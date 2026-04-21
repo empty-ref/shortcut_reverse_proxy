@@ -16,9 +16,9 @@ class ProxyConfig:
     # max_header_bytes: int = 64 * 1024
     # max_requests_per_client_connection: int = 100
 
-    max_client_conns: int = 1000
+    max_client_conns: int = 2000
     upstreams: list[tuple[str, int]] = field(default_factory=lambda: [('127.0.0.1', 9001), ('127.0.0.1', 9002)])
-    max_conns_per_upstream: int = 1000
+    max_conns_per_upstream: int = 2000
 
     # tcp_keepalive_idle: int = 30
     # tcp_keepalive_interval: int = 10

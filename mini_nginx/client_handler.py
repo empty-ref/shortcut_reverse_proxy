@@ -152,9 +152,7 @@ async def handle_client(
                 )
                 break
             except Exception as e:
-                logger.exception(
-                    'request %s failed at stage=%s type=%s error=%r', req_uuid, stage, type(e).__name__, e
-                )
+                logger.exception('request %s failed at stage=%s type=%s error=%r', req_uuid, stage, type(e).__name__, e)
                 with contextlib.suppress(Exception):
                     await send_response(client_writer, DEFAULT_502_RESPONSE)
                 break
