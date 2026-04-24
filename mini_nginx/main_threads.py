@@ -44,7 +44,7 @@ class ThreadedUpstreamPool:
         queue = self._queues[target]
         while not queue.empty():
             sock = queue.get_nowait()
-            if sock.fileno() != -1:
+            if sock.fileno() != -1 and self._is_socket_usable(sock):
                 sock.setblocking(False)
                 return sock
             self._safe_close(sock)
@@ -72,12 +72,24 @@ class ThreadedUpstreamPool:
         except OSError:
             pass
 
+    @staticmethod
+    def _is_socket_usable(sock: socket.socket) -> bool:
+        try:
+            data = sock.recv(1, socket.MSG_PEEK)
+            if data == b'':
+                return False
+            return True
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+
 
 class SelectorProxyServer:
     def __init__(self, config: ProxyConfig) -> None:
         self.config = config
         self.targets = [UpstreamTarget(host=h, port=p) for h, p in config.upstreams]
-        self.rr = ThreadSafeRoundRobin(self.targets)
+        self.round_robin = ThreadSafeRoundRobin(self.targets)
         self.pool = ThreadedUpstreamPool(self.targets, config.max_conns_per_upstream)
         self.client_limiter = threading.BoundedSemaphore(config.max_client_conns)
         self.client_proxy_semaphore = threading.BoundedSemaphore(config.max_client_conns)
@@ -121,12 +133,13 @@ class SelectorProxyServer:
             self.client_limiter.release()
 
     def _proxy_session(self, client_sock: socket.socket, client_addr: tuple[str, int], deadline: float) -> None:
-        target = self.rr.next()
+        target = self.round_robin.next()
         upstream_sock = None
         try:
             upstream_sock = self.pool.acquire(target, self.config.connect_timeout)
-            self._bridge_bidirectional(client_sock, upstream_sock, deadline)
-            self.pool.release(target, upstream_sock, reusable=True)
+            closed_by = self._bridge_bidirectional(client_sock, upstream_sock, deadline)
+            reusable = closed_by != 'upstream' and upstream_sock.fileno() != -1
+            self.pool.release(target, upstream_sock, reusable=reusable)
             upstream_sock = None
         except Exception as exc:
             logger.debug('client=%s upstream=%s:%s failed: %r', client_addr, target.host, target.port, exc)
@@ -135,11 +148,10 @@ class SelectorProxyServer:
         finally:
             self._safe_close(client_sock)
 
-    def _bridge_bidirectional(self, client_sock: socket.socket, upstream_sock: socket.socket, deadline: float) -> None:
+    def _bridge_bidirectional(self, client_sock: socket.socket, upstream_sock: socket.socket, deadline: float) -> str:
         selector = selectors.DefaultSelector()
         selector.register(client_sock, selectors.EVENT_READ, data=upstream_sock)
         selector.register(upstream_sock, selectors.EVENT_READ, data=client_sock)
-        sockets = (client_sock, upstream_sock)
 
         try:
             while True:
@@ -154,15 +166,12 @@ class SelectorProxyServer:
                     dst_sock = key.data
                     data = src_sock.recv(64 * 1024)
                     if not data:
-                        return
+                        if src_sock is upstream_sock:
+                            return 'upstream'
+                        return 'client'
                     self._send_all_nonblocking(dst_sock, data, deadline)
         finally:
             selector.close()
-            for sock in sockets:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
 
     @staticmethod
     def _send_all_nonblocking(dst_sock: socket.socket, data: bytes, deadline: float) -> None:
@@ -201,7 +210,7 @@ class SelectorProxyServer:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    config = ProxyConfig.from_yaml('config.yml')
+    config = ProxyConfig()
     SelectorProxyServer(config).serve_forever()
 
 

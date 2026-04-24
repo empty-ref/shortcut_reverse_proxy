@@ -15,7 +15,7 @@ def _worker(config: ProxyConfig) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    config = ProxyConfig.from_yaml('config.yml')
+    config = ProxyConfig()
     workers = max(1, mp.cpu_count())
 
     # For REUSEPORT mode, every worker creates its own listening socket.
