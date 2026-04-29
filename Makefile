@@ -3,8 +3,14 @@ PYTHON ?= python
 
 .PHONY: proxy echo echo-fastapi k6 k6-stress
 
-proxy:
-	$(PYTHON) -m mini_nginx.main
+proxy-asyncio:
+	$(PYTHON) -m mini_nginx.main_asyncio
+
+proxy-threads:
+	$(PYTHON) -m mini_nginx.main_threads
+
+proxy-proces:
+	$(PYTHON) -m mini_nginx.main_multiprocessing
 
 echo:
 	$(PYTHON) -m mini_nginx.echo.echo_app --port $(PORT)
